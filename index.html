@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Dark → Light PDF Converter</title>
+  <style>
+    :root{--bg:#0f1724;--card:#0b1220;--accent:#06b6d4;--muted:#9aa4b2;--white:#e6eef6}
+    body{font-family:Inter,ui-sans-serif,system-ui,Segoe UI,Roboto,"Helvetica Neue",Arial;background:linear-gradient(180deg,var(--bg),#071027);color:var(--white);margin:0;padding:20px}
+    .wrap{max-width:980px;margin:24px auto;background:linear-gradient(180deg,rgba(255,255,255,0.02),rgba(255,255,255,0.01));border-radius:12px;padding:18px}
+    h1{margin:0 0 8px 0;font-size:20px}
+    p.lead{color:var(--muted);margin:0 0 18px 0}
+    .controls{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+    .btn{background:var(--accent);color:#021018;border:none;padding:10px 14px;border-radius:8px;cursor:pointer;font-weight:600}
+    .btn.secondary{background:transparent;border:1px solid rgba(255,255,255,0.06);color:var(--white)}
+    .filedrop{border:2px dashed rgba(255,255,255,0.04);padding:18px;border-radius:10px;text-align:center;color:var(--muted);margin-bottom:12px}
+    .opts{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+    label{font-size:13px;color:var(--muted)}
+    input[type=range]{width:180px}
+    #preview{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;margin-top:12px}
+    canvas{width:100%;height:auto;border-radius:6px;box-shadow:0 6px 20px rgba(2,6,23,0.6)}
+    .small{font-size:12px;color:var(--muted)}
+    footer{margin-top:14px;font-size:12px;color:var(--muted)}
+    a.link{color:var(--accent);text-decoration:none}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Dark → Light PDF Converter</h1>
+    <p class="lead">Client-side PDF inverter for GitHub Pages — drag/drop a PDF and convert dark-background pages to readable light pages. No files uploaded to server.</p>
+
+    <div class="filedrop" id="drop">Drop PDF here or <input id="fileInput" type="file" accept="application/pdf" style="display:inline-block;opacity:0;position:relative;left:6px;top:6px;"/></div>
+
+    <div class="opts">
+      <label class="small">Mode:
+        <select id="mode">
+          <option value="auto">Auto (recommended)</option>
+          <option value="invert">Invert Colors</option>
+          <option value="desaturate">Desaturate + Brighten</option>
+        </select>
+      </label>
+
+      <label class="small">Threshold: <span id="thVal">120</span>
+        <input type="range" id="threshold" min="0" max="255" value="120" />
+      </label>
+
+      <label class="small">Contrast: <span id="cVal">1.2</span>
+        <input type="range" id="contrast" min="0.5" max="2" step="0.1" value="1.2" />
+      </label>
+
+      <label class="small">Text Fade (%): <span id="fadeVal">0</span>
+        <input type="range" id="fade" min="0" max="100" value="0" />
+      </label>
+    </div>
+
+    <div class="controls">
+      <button id="process" class="btn">Convert & Download</button>
+      <button id="previewBtn" class="btn secondary">Preview Pages</button>
+      <div id="status" class="small" style="align-self:center;margin-left:8px">Ready</div>
+    </div>
+
+    <div id="preview" aria-live="polite"></div>
+
+    <footer>Built for GitHub Pages — client-side only. If output looks odd for complex PDFs (images + text), try switching mode or increasing resolution in advanced usage.</footer>
+  </div>
+
+  <!-- Libraries: pdf.js (for rendering) and pdf-lib (for PDF creation) -->
+  <script src="https://unpkg.com/pdfjs-dist@3.11.172/build/pdf.min.js"></script>
+  <script src="https://unpkg.com/pdf-lib/dist/pdf-lib.min.js"></script>
+
+  <script>
+    // Basic app for client-side dark->light conversion
+    const fileInput = document.getElementById('fileInput');
+    const drop = document.getElementById('drop');
+    const processBtn = document.getElementById('process');
+    const previewBtn = document.getElementById('previewBtn');
+    const preview = document.getElementById('preview');
+    const status = document.getElementById('status');
+    const modeEl = document.getElementById('mode');
+    const threshold = document.getElementById('threshold');
+    const thVal = document.getElementById('thVal');
+    const contrast = document.getElementById('contrast');
+    const cVal = document.getElementById('cVal');
+    const fade = document.getElementById('fade');
+    const fadeVal = document.getElementById('fadeVal');
+
+    thVal.textContent = threshold.value;
+    cVal.textContent = contrast.value;
+    fadeVal.textContent = fade.value;
+
+    threshold.addEventListener('input', ()=> thVal.textContent = threshold.value);
+    contrast.addEventListener('input', ()=> cVal.textContent = contrast.value);
+    fade.addEventListener('input', ()=> fadeVal.textContent = fade.value);
+
+    let loadedPdfBytes = null;
+
+    drop.addEventListener('click', ()=> fileInput.click());
+
+    ;['dragenter','dragover'].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.style.borderColor='rgba(255,255,255,0.12)'}));
+    ;['dragleave','drop'].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.style.borderColor='rgba(255,255,255,0.04)'}));
+
+    drop.addEventListener('drop', ev => {
+      ev.preventDefault();
+      const f = ev.dataTransfer.files && ev.dataTransfer.files[0];
+      if(f) handleFile(f);
+    });
+
+    fileInput.addEventListener('change', e => {
+      const f = e.target.files && e.target.files[0];
+      if(f) handleFile(f);
+    });
+
+    function setStatus(t){ status.textContent = t }
+
+    function handleFile(file){
+      if(!file.type.includes('pdf')){ alert('Please choose a PDF file'); return }
+      const reader = new FileReader();
+      reader.onload = e => {
+        loadedPdfBytes = new Uint8Array(e.target.result);
+        setStatus('PDF loaded — pages ready');
+      };
+      reader.readAsArrayBuffer(file);
+    }
+
+    // Use pdf.js to render pages to canvases, process pixels, then rebuild PDF with pdf-lib
+    async function renderPages(bytes, renderForDownload=false){
+      setStatus('Opening PDF...');
+      const loadingTask = pdfjsLib.getDocument({data:bytes});
+      const pdf = await loadingTask.promise;
+      const pages = [];
+      for(let i=1;i<=pdf.numPages;i++){
+        setStatus(`Rendering page ${i}/${pdf.numPages} ...`);
+        const page = await pdf.getPage(i);
+        // render at higher scale for quality
+        const scale = 2.0; // you can tweak
+        const viewport = page.getViewport({scale});
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.floor(viewport.width);
+        canvas.height = Math.floor(viewport.height);
+        const ctx = canvas.getContext('2d');
+        const renderContext = {canvasContext: ctx, viewport};
+        await page.render(renderContext).promise;
+        // process pixels
+        setStatus(`Processing page ${i} pixels...`);
+        const imgData = ctx.getImageData(0,0,canvas.width,canvas.height);
+        processImageData(imgData, modeEl.value, parseInt(threshold.value), parseFloat(contrast.value), parseInt(fade.value));
+        ctx.putImageData(imgData,0,0);
+        pages.push(canvas);
+        // if preview requested, attach small thumb
+        if(!renderForDownload){
+          const thumb = document.createElement('canvas');
+          const tw = 300; const th = Math.round((canvas.height/canvas.width)*tw);
+          thumb.width = tw; thumb.height = th;
+          thumb.getContext('2d').drawImage(canvas,0,0,tw,th);
+          preview.appendChild(thumb);
+        }
+      }
+      setStatus('All pages processed');
+      return pages;
+    }
+
+    function processImageData(imgData, mode, thresh, contrastVal, fadePct){
+      const d = imgData.data;
+      // compute average brightness quickly to decide if page is dark-heavy
+      let sum=0; let cnt=0;
+      for(let i=0;i<d.length;i+=4){
+        const r=d[i], g=d[i+1], b=d[i+2];
+        const lum = 0.299*r + 0.587*g + 0.114*b;
+        sum += lum; cnt++;
+      }
+      const avg = sum/cnt;
+      const shouldInvert = (mode==='invert') || (mode==='auto' && avg < thresh+20);
+
+      for(let i=0;i<d.length;i+=4){
+        let r=d[i], g=d[i+1], b=d[i+2];
+        // apply chosen transformation
+        if(shouldInvert){
+          r = 255 - r; g = 255 - g; b = 255 - b;
+        } else if(mode==='desaturate'){
+          // desaturate toward gray then brighten
+          const gray = 0.299*r + 0.587*g + 0.114*b;
+          r = gray; g = gray; b = gray;
+        }
+        // adjust contrast around mid = 128
+        r = ((r - 128) * contrastVal) + 128;
+        g = ((g - 128) * contrastVal) + 128;
+        b = ((b - 128) * contrastVal) + 128;
+        // apply fade to text: blend pixel toward background (white)
+        const fade = fadePct/100;
+        r = r + (255 - r) * fade;
+        g = g + (255 - g) * fade;
+        b = b + (255 - b) * fade;
+        // clamp
+        d[i] = Math.max(0,Math.min(255,Math.round(r)));
+        d[i+1] = Math.max(0,Math.min(255,Math.round(g)));
+        d[i+2] = Math.max(0,Math.min(255,Math.round(b)));
+        // alpha stays same
+      }
+    }
+
+    async function buildPdfFromCanvases(canvases){
+      setStatus('Building output PDF...');
+      const pdfDoc = await PDFLib.PDFDocument.create();
+      for(const canvas of canvases){
+        const imgDataUrl = canvas.toDataURL('image/png');
+        const pngImage = await pdfDoc.embedPng(imgDataUrl);
+        const page = pdfDoc.addPage([pngImage.width, pngImage.height]);
+        page.drawImage(pngImage,{x:0,y:0,width:pngImage.width,height:pngImage.height});
+      }
+      const out = await pdfDoc.save();
+      return out;
+    }
+
+    processBtn.addEventListener('click', async ()=>{
+      if(!loadedPdfBytes){ alert('Pehle PDF choose kar'); return }
+      preview.innerHTML='';
+      setStatus('Starting conversion...');
+      // render pages with processing
+      const canvases = await renderPages(loadedPdfBytes, true);
+      const outBytes = await buildPdfFromCanvases(canvases);
+      const blob = new Blob([outBytes],{type:'application/pdf'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'converted.pdf';
+      document.body.appendChild(a); a.click(); a.remove();
+      setStatus('Done — converted.pdf downloaded');
+    });
+
+    previewBtn.addEventListener('click', async ()=>{
+      if(!loadedPdfBytes){ alert('Pehle PDF choose kar'); return }
+      preview.innerHTML='';
+      setStatus('Generating preview...');
+      await renderPages(loadedPdfBytes, false);
+      setStatus('Preview ready');
+    });
+
+    // Quick note: pdf.js worker setup
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://unpkg.com/pdfjs-dist@3.11.172/build/pdf.worker.min.js';
+  </script>
+</body>
+</html>
